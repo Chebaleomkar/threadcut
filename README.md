@@ -150,11 +150,20 @@ transformers `generate`.
 
 ## Data
 
-Every agent step is recorded, so all of this can be re-analyzed without a GPU:
-`results/traces/*.jsonl` (per-step cache stats), `results/pi/*.jsonl` (full agent event streams),
-`results/dumps/*.jsonl` (exact messages and generated token ids, used for the cost replay and the
-drift replay). `python -m experiments.viewer build <results> viewer.html` builds a page for
-stepping through any run.
+Every agent step from both benchmark runs is in the repo (`data/v1`, `data/v2`, 24 MB), so all
+of this can be re-analyzed without a GPU:
+
+- `results.jsonl`: one line per agent run (mode, task, pass/fail, steps, tokens, times).
+- `traces/*.jsonl`: per-step engine stats (prompt, reused prefix/suffix, computed, pruned, TTFT).
+- `pi/*.jsonl`: the Pi agent's full event stream (every message, tool call and tool result).
+- `dumps/*.jsonl.gz`: exact messages and generated token ids per step, which the cost replay
+  and the drift replay use.
+- `drift.jsonl`: the per-step KL measurements.
+
+```bash
+python -m experiments.replay_cost --tokenizer Qwen/Qwen3-4B-Instruct-2507 --out docs data/v1 data/v2
+python -m experiments.viewer build data/v2 viewer.html     # step through any agent run
+```
 
 ## How it works
 

@@ -6,9 +6,10 @@ under each policy, with exactly the engine's rules (same pruning, rendering, and
 so the only thing that changes is the policy. No GPU: this is token accounting with the
 tokenizer. Prefill seconds are estimated from the T4 throughput measured in the traces.
 
-Usage: python -m experiments.replay_cost --tokenizer models/Qwen3-4B-tok --out docs/ runs/full/results runs/v2/results
+Usage: python -m experiments.replay_cost --tokenizer Qwen/Qwen3-4B-Instruct-2507 --out docs/ data/v1 data/v2
 """
 import argparse
+import gzip
 import json
 import pathlib
 
@@ -58,10 +59,13 @@ def main():
     traces, rows = [], []
     for res in map(pathlib.Path, a.results):
         traces += [json.loads(l) for f in sorted((res / "traces").glob("*.jsonl")) for l in open(f, encoding="utf-8")]
-        for f in sorted((res / "dumps").glob("*.jsonl")):
-            steps = [json.loads(l) for l in open(f, encoding="utf-8")]
+        label = res.name if res.name != "results" else res.parent.name
+        for f in sorted((res / "dumps").glob("*.jsonl*")):  # plain or gzipped
+            with (gzip.open(f, "rt", encoding="utf-8") if f.suffix == ".gz" else open(f, encoding="utf-8")) as fh:
+                steps = [json.loads(l) for l in fh]
+            run = f.name.split(".")[0]
             for name, (k, suffix) in POLICIES.items():
-                rows.append({"run": f"{res.parent.name}/{f.stem}", "policy": name, **replay(tok, steps, k, suffix)})
+                rows.append({"run": f"{label}/{run}", "policy": name, **replay(tok, steps, k, suffix)})
                 print(rows[-1], flush=True)
     rate, overhead = prefill_rate(traces)
     (docs / "replay_cost.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
