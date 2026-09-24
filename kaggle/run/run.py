@@ -15,7 +15,7 @@ import time
 import urllib.request
 
 WORK = "/kaggle/working"
-SRC = f"{WORK}/threadcut"
+SRC = "/kaggle/tmp/threadcut"
 RES = f"{WORK}/results"
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 MODEL_DIR = "/kaggle/tmp/Qwen3-4B"

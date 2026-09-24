@@ -5,7 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache, Qwen3Config
 
 from threadcut.engine import Engine
-from threadcut.kv import shift_keys, rotate_half
+from threadcut.kv import GrowingLayer, shift_keys, rotate_half, splice
 from threadcut.match import Split, split
 
 SMALL = os.environ.get("THREADCUT_TEST_MODEL", "models/Qwen3-0.6B")
@@ -88,18 +88,47 @@ def test_T2_splice_matches_fresh_compute(eng):
     assert torch.allclose(logits[0].float(), ref_logits.float(), atol=atol, rtol=0)
 
 
+def hf_generate(m, ids, n, stop):
+    """Reference decode with stock transformers SDPA attention (independent of threadcut.attention)."""
+    impl = m.config._attn_implementation
+    m.set_attn_implementation("sdpa")
+    try:
+        return m.generate(torch.tensor([ids], device=m.device), max_new_tokens=n, do_sample=False,
+                          eos_token_id=list(stop))[0, len(ids):].tolist()
+    finally:
+        m.set_attn_implementation(impl)
+
+
+def test_growing_layer_splice_matches_copy_splice():
+    torch.manual_seed(0)
+    k, v = torch.randn(1, 2, 40, 16), torch.randn(1, 2, 40, 16)
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, 16, 2).float() / 16))
+    g = GrowingLayer()
+    g.update(k, v)
+    plain = DynamicCache(config=Qwen3Config(num_hidden_layers=1))
+    plain.layers[0].update(k, v)
+    for s in (Split(10, 17, 20), Split(12, 12, 0)):
+        grown = GrowingLayer()
+        grown.update(k, v)
+        grown.splice(s, inv_freq)
+        ref = DynamicCache(config=Qwen3Config(num_hidden_layers=1))
+        ref.layers[0].update(k, v)
+        splice(ref, s, inv_freq)
+        assert torch.allclose(grown.keys, ref.layers[0].keys) and torch.allclose(grown.values, ref.layers[0].values)
+        grown.update(k[:, :, :3], v[:, :, :3])  # appending after a splice keeps working
+        assert grown.get_seq_length() == s.a + s.c + 3
+
+
 def test_T3_no_pruning_matches_hf_generate(eng):
     engine, _ = eng
     engine.reset()
     m = engine.model
     p1 = rand_ids(20, 5)
     out1, s1 = engine.generate(p1, max_new_tokens=12)
-    ref1 = m.generate(torch.tensor([p1], device=m.device), max_new_tokens=12, do_sample=False,
-                      eos_token_id=list(engine.stop_ids))[0, len(p1):].tolist()
+    ref1 = hf_generate(m, p1, 12, engine.stop_ids)
     assert out1 == [t for t in ref1 if t not in engine.stop_ids][:len(out1)]
     p2 = p1 + out1 + rand_ids(6, 6)
     out2, s2 = engine.generate(p2, max_new_tokens=12)
     assert s2["reused_tokens"] == len(p1) + len(out1) and s2["computed_tokens"] == 6
-    ref2 = m.generate(torch.tensor([p2], device=m.device), max_new_tokens=12, do_sample=False,
-                      eos_token_id=list(engine.stop_ids))[0, len(p2):].tolist()
+    ref2 = hf_generate(m, p2, 12, engine.stop_ids)
     assert out2 == [t for t in ref2 if t not in engine.stop_ids][:len(out2)]

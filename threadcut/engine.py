@@ -6,9 +6,10 @@ cache is spliced to A·C (kv.splice), and only D is prefilled before decoding.
 import time
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .kv import splice
+from . import attention
+from .kv import new_cache, splice
 from .match import split
 
 
@@ -23,7 +24,7 @@ class Engine:
         self.device = torch.device(device)
         self.tok = tokenizer or AutoTokenizer.from_pretrained(model_path)
         self.model = model or AutoModelForCausalLM.from_pretrained(
-            model_path, dtype=dtype, attn_implementation="sdpa").to(self.device)
+            model_path, dtype=dtype, attn_implementation=attention.NAME).to(self.device)
         self.model.eval()
         cfg = self.model.config
         rope = getattr(cfg, "rope_parameters", None) or {}
@@ -51,7 +52,7 @@ class Engine:
         """Bring the cache to `new_ids` with as little compute as possible. Returns (last logits, stats)."""
         s = split(self.ids, new_ids, self.min_suffix, self.suffix) if self.cache is not None else None
         if s is None or (s.a == 0 and s.c == 0):
-            self.cache, reused = DynamicCache(config=self.model.config), 0
+            self.cache, reused = new_cache(self.model.config), 0
         else:
             splice(self.cache, s, self.inv_freq)
             reused = s.a + s.c
