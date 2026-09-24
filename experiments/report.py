@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.ticker  # noqa: E402
 
 MODES = {"full": ("No pruning", "#2a78d6"), "prune_prefix": ("Pruning + prefix cache", "#eb6834"),
          "prune_suffix": ("Pruning + suffix reuse", "#1baf7a")}
@@ -51,6 +52,7 @@ def style(ax, title, ylabel):
         ax.spines[s].set_color(GRID)
     ax.tick_params(colors=MUTED)
     ax.yaxis.grid(True, color=GRID, linewidth=0.8)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 10 else f"{v:g}"))
     ax.set_axisbelow(True)
 
 

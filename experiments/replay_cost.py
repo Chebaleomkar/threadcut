@@ -15,6 +15,7 @@ import pathlib
 import numpy as np
 from transformers import AutoTokenizer
 
+from experiments.report import INK, MUTED, style
 from threadcut.chat import Renderer, parse_reply, prune
 from threadcut.match import split
 
@@ -78,6 +79,32 @@ def main():
                      f"{secs:,.0f} s | {np.mean([r['peak_context'] for r in rs]):,.0f} |")
     (docs / "replay_cost.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
+    chart(docs / "cost.png", rows)
+
+
+def chart(out, rows):
+    """Two panels on separate axes: prefill tokens computed, and peak context held."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    colors = ["#2a78d6", "#eb6834", "#1baf7a"]
+    labels = ["No pruning\n+ prefix cache", "Pruning\n+ prefix cache", "Pruning\n+ suffix reuse"]
+    comp = [sum(r["computed_tokens"] for r in rows if r["policy"] == n) for n in POLICIES]
+    peak = [np.mean([r["peak_context"] for r in rows if r["policy"] == n]) for n in POLICIES]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), dpi=150)
+    for ax, vals, title in ((axes[0], comp, "Prefill tokens the GPU computed"),
+                            (axes[1], peak, "Peak context held in KV cache (mean per run)")):
+        bars = ax.bar(labels, vals, color=colors, width=0.55)
+        for b, v in zip(bars, vals):
+            ax.annotate(f"{v:,.0f}", (b.get_x() + b.get_width() / 2, b.get_height()), ha="center", va="bottom",
+                        xytext=(0, 4), textcoords="offset points", color=INK, fontsize=10)
+        style(ax, title, "tokens")
+        ax.tick_params(axis="x", labelsize=9)
+    fig.suptitle("Same 18 agent conversations, replayed under three cache policies", x=0.01, ha="left",
+                 color=MUTED, fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
