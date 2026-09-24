@@ -1,7 +1,7 @@
-Same 18 recorded conversations (664 agent steps), replayed under each policy. Prefill time estimated at the measured T4 rate of 1,203 tokens/s (+170 ms per step).
+Same 36 recorded conversations (1,847 agent steps), replayed under each policy. Prefill time estimated at the measured T4 rate of 1,281 tokens/s (+158 ms per step).
 
 | Policy | Tokens in prompts | Tokens computed (prefill) | vs. no pruning | Est. prefill time | Mean peak context |
 |---|---|---|---|---|---|
-| No pruning + prefix cache | 11,774,948 | 132,459 | 1.00x | 223 s | 11,021 |
-| Pruning (k=1) + prefix cache | 5,447,634 | 361,331 | 2.73x | 414 s | 5,745 |
-| Pruning (k=1) + suffix reuse | 5,447,634 | 132,459 | 1.00x | 223 s | 5,745 |
+| No pruning + prefix cache | 27,067,008 | 320,162 | 1.00x | 543 s | 14,336 |
+| Pruning (k=1) + prefix cache | 13,769,130 | 965,414 | 3.02x | 1,046 s | 7,716 |
+| Pruning (k=1) + suffix reuse | 13,769,130 | 319,415 | 1.00x | 542 s | 7,716 |

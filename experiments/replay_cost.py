@@ -6,7 +6,7 @@ under each policy, with exactly the engine's rules (same pruning, rendering, and
 so the only thing that changes is the policy. No GPU: this is token accounting with the
 tokenizer. Prefill seconds are estimated from the T4 throughput measured in the traces.
 
-Usage: python -m experiments.replay_cost --tokenizer models/Qwen3-4B-tok results/ docs/
+Usage: python -m experiments.replay_cost --tokenizer models/Qwen3-4B-tok --out docs/ runs/full/results runs/v2/results
 """
 import argparse
 import json
@@ -50,19 +50,20 @@ def prefill_rate(traces):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tokenizer", required=True)
-    p.add_argument("results")
-    p.add_argument("docs")
+    p.add_argument("--out", required=True)
+    p.add_argument("results", nargs="+", help="one or more benchmark results folders")
     a = p.parse_args()
-    res, docs = pathlib.Path(a.results), pathlib.Path(a.docs)
+    docs = pathlib.Path(a.out)
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
-    traces = [json.loads(l) for f in sorted((res / "traces").glob("*.jsonl")) for l in open(f, encoding="utf-8")]
+    traces, rows = [], []
+    for res in map(pathlib.Path, a.results):
+        traces += [json.loads(l) for f in sorted((res / "traces").glob("*.jsonl")) for l in open(f, encoding="utf-8")]
+        for f in sorted((res / "dumps").glob("*.jsonl")):
+            steps = [json.loads(l) for l in open(f, encoding="utf-8")]
+            for name, (k, suffix) in POLICIES.items():
+                rows.append({"run": f"{res.parent.name}/{f.stem}", "policy": name, **replay(tok, steps, k, suffix)})
+                print(rows[-1], flush=True)
     rate, overhead = prefill_rate(traces)
-    rows = []
-    for f in sorted((res / "dumps").glob("*.jsonl")):
-        steps = [json.loads(l) for l in open(f, encoding="utf-8")]
-        for name, (k, suffix) in POLICIES.items():
-            rows.append({"run": f.stem, "policy": name, **replay(tok, steps, k, suffix)})
-            print(rows[-1], flush=True)
     (docs / "replay_cost.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     base = {r["run"]: r for r in rows if r["policy"] == next(iter(POLICIES))}
     lines = [f"Same {len(base)} recorded conversations ({sum(b['steps'] for b in base.values()):,} agent steps), "
@@ -100,7 +101,7 @@ def chart(out, rows):
                         xytext=(0, 4), textcoords="offset points", color=INK, fontsize=10)
         style(ax, title, "tokens")
         ax.tick_params(axis="x", labelsize=9)
-    fig.suptitle("Same 18 agent conversations, replayed under three cache policies", x=0.01, ha="left",
+    fig.suptitle(f"Same {len(rows) // len(POLICIES)} agent conversations, replayed under three cache policies", x=0.01, ha="left",
                  color=MUTED, fontsize=10)
     fig.tight_layout()
     fig.savefig(out)
