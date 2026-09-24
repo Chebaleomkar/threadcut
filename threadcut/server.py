@@ -20,9 +20,20 @@ from .engine import Engine
 
 def build_app(engine, k, trace_path, model_name, temperature=0.0, max_tokens=4096):
     app = FastAPI()
-    renderer = Renderer(engine.tok)
     lock = threading.Lock()
-    step = {"n": 0}
+    state = {"k": k, "trace": trace_path, "dump": None, "step": 0, "renderer": Renderer(engine.tok)}
+
+    @app.post("/admin/config")
+    async def configure(request: Request):
+        """Switch mode between runs: {k, suffix, trace, dump}. Clears the cache and remembered replies."""
+        body = await request.json()
+        with lock:
+            state.update(k=body.get("k"), trace=body.get("trace"), dump=body.get("dump"), step=0,
+                         renderer=Renderer(engine.tok))
+            engine.suffix = body.get("suffix", True)
+            engine.reset()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        return {"ok": True, **{key: state[key] for key in ("k", "trace", "dump")}, "suffix": engine.suffix}
 
     @app.get("/v1/models")
     def models():
@@ -31,8 +42,9 @@ def build_app(engine, k, trace_path, model_name, temperature=0.0, max_tokens=409
     def run(body):
         messages = normalize(body["messages"])
         tools = body.get("tools")
-        kept, n_pruned = prune(messages, k)
         with lock:
+            k, renderer = state["k"], state["renderer"]
+            kept, n_pruned = prune(messages, k)
             full_tokens = len(renderer.render(messages, tools)) if n_pruned else None
             ids = renderer.render(kept, tools)
             out, stats = engine.generate(ids, max_new_tokens=min(body.get("max_tokens") or max_tokens, max_tokens),
@@ -40,15 +52,19 @@ def build_app(engine, k, trace_path, model_name, temperature=0.0, max_tokens=409
             text = engine.tok.decode(out)
             content, tool_calls = parse_reply(text)
             renderer.remember(content, tool_calls, out)
-            step["n"] += 1
-            rec = {"step": step["n"], "t": time.time(), "k": k, "suffix": engine.suffix,
+            state["step"] += 1
+            rec = {"step": state["step"], "t": time.time(), "k": k, "suffix": engine.suffix,
                    "n_messages": len(messages), "subtasks_pruned": n_pruned,
                    "full_prompt_tokens": full_tokens or stats["prompt_tokens"], **stats,
                    "tool_calls": [tc["function"]["name"] for tc in tool_calls],
                    "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else None}
-            if trace_path:
-                with open(trace_path, "a", encoding="utf-8") as f:
+            if state["trace"]:
+                with open(state["trace"], "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec) + "\n")
+            if state["dump"]:
+                with open(state["dump"], "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"step": state["step"], "messages": messages, "tools": tools,
+                                        "gen_ids": out}) + "\n")
         finish = "tool_calls" if tool_calls else ("length" if stats["finish"] == "length" else "stop")
         usage = {"prompt_tokens": stats["prompt_tokens"], "completion_tokens": stats["completion_tokens"],
                  "total_tokens": stats["prompt_tokens"] + stats["completion_tokens"],

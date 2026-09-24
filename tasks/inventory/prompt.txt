@@ -1,0 +1,1 @@
+The tests in tests/ are failing. Find and fix the bugs in the inventory package (there are several, spread across files) until `python -m pytest -q` passes. Do not modify the tests.
