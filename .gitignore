@@ -8,3 +8,4 @@ pi-config/sessions/
 pi-config/*.lock
 pi-config/auth.json
 runs/
+pi-config/models-store.json
