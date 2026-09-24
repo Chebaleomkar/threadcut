@@ -1,0 +1,6 @@
+models/
+__pycache__/
+*.pyc
+kaggle/*/out/
+.env
+runs/tmp/
