@@ -6,6 +6,8 @@ Everything the job produces lands in /kaggle/working/results.
 import json
 import os
 import queue
+import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -126,6 +128,28 @@ def run_job(port, pidir, task, mode, k, suffix):
     print(json.dumps(rec), flush=True)
 
 
+def live_dashboard():
+    """Serve the run viewer live and expose it through a cloudflared quick tunnel (token-protected).
+    The link is printed to the Kaggle log, which is the one thing visible while the job runs."""
+    for d in ("traces", "dumps", "pi"):
+        os.makedirs(f"{RES}/{d}", exist_ok=True)
+    token = secrets.token_urlsafe(12)
+    subprocess.Popen([sys.executable, "-m", "experiments.viewer", "serve", RES, "--port", "8090", "--token", token],
+                     cwd=SRC, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    exe = "/kaggle/tmp/cloudflared"
+    urllib.request.urlretrieve("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", exe)
+    os.chmod(exe, 0o755)
+    log = open("/kaggle/tmp/cloudflared.log", "w")
+    subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:8090"], stdout=log, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        m = re.search(r"https://[-a-z0-9]+\.trycloudflare\.com", open("/kaggle/tmp/cloudflared.log").read())
+        if m:
+            print(f"\n==== LIVE DASHBOARD: {m.group(0)}/?t={token} ====\n", flush=True)
+            return
+        time.sleep(2)
+    print("live dashboard: tunnel did not come up (the run continues without it)", flush=True)
+
+
 def benchmark():
     for d in ("traces", "dumps", "pi"):
         os.makedirs(f"{RES}/{d}", exist_ok=True)
@@ -172,6 +196,10 @@ def drift():
 if __name__ == "__main__":
     t0 = time.time()
     setup()
+    try:
+        live_dashboard()
+    except Exception as e:  # the dashboard is a convenience; never let it stop the benchmark
+        print("live dashboard failed:", repr(e), flush=True)
     tests()
     benchmark()
     drift()

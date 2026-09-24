@@ -1,15 +1,19 @@
-"""Build a self-contained HTML viewer for a benchmark results folder.
+"""Viewer for benchmark results: a static HTML file, or a live dashboard served while runs are going.
 
-Pick any of the agent runs on the left and step through what the agent said, which tools it
-called, what came back, and what the engine's cache did on that step (reused vs computed, what
-was pruned). Each Pi turn is one model call, so turn i lines up with engine trace step i.
+Pick any agent run on the left and step through what the agent said, which tools it called, what
+came back, and what the engine's cache did on that step (reused vs computed, what was pruned).
+Each Pi turn is one model call, so turn i lines up with engine trace step i.
 
-Usage: python -m experiments.viewer runs/full/results runs/full/viewer.html
+Usage:
+  python -m experiments.viewer build runs/full/results runs/full/viewer.html
+  python -m experiments.viewer serve /kaggle/working/results --port 8090 --token SECRET
 """
-import html
+import argparse
 import json
 import pathlib
-import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CLIP = 2500
 
@@ -25,16 +29,23 @@ def texts(content):
     return "\n".join(p.get("text", "") for p in content or [] if isinstance(p, dict) and p.get("type") == "text")
 
 
+def jsonl(path):
+    """Parse a JSONL file that may still be being written (skips a partial last line)."""
+    out = []
+    for line in open(path, encoding="utf-8") if path.exists() else []:
+        if line.startswith("{"):
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
 def load_run(res, rec):
     name = f"{rec['mode']}__{rec['task']}"
-    trace = [json.loads(l) for l in open(res / "traces" / f"{name}.jsonl", encoding="utf-8")] \
-        if (res / "traces" / f"{name}.jsonl").exists() else []
+    trace = jsonl(res / "traces" / f"{name}.jsonl")
     turns = []
-    pi = res / "pi" / f"{name}.jsonl"
-    for line in open(pi, encoding="utf-8") if pi.exists() else []:
-        if not line.startswith("{"):
-            continue
-        e = json.loads(line)
+    for e in jsonl(res / "pi" / f"{name}.jsonl"):
         if e.get("type") != "turn_end":
             continue
         msg = e.get("message") or {}
@@ -50,6 +61,24 @@ def load_run(res, rec):
                                             "dropped_from_cache", "computed_tokens", "subtasks_pruned",
                                             "completion_tokens", "ttft_s", "decode_s", "malformed_calls")}
     return {"id": name, **rec, "turns": turns}
+
+
+def collect(res):
+    """Finished runs from results.jsonl plus runs still in progress (trace/log exist, no result yet)."""
+    recs = jsonl(res / "results.jsonl")
+    done = {f"{r['mode']}__{r['task']}" for r in recs}
+    for f in sorted((res / "pi").glob("*.jsonl")) if (res / "pi").exists() else []:
+        if f.stem in done:
+            continue
+        mode, task = f.stem.split("__")
+        trace = jsonl(res / "traces" / f"{f.stem}.jsonl")
+        recs.append({"task": task, "mode": mode, "passed": None, "pi_status": "running", "steps": len(trace),
+                     "wall_s": time.time() - trace[0]["t"] if trace else 0,
+                     "prompt_tokens": sum(t["prompt_tokens"] for t in trace),
+                     "computed_tokens": sum(t["computed_tokens"] for t in trace),
+                     "reused_tokens": sum(t["reused_tokens"] for t in trace),
+                     "peak_prompt_tokens": max((t["prompt_tokens"] for t in trace), default=0)})
+    return [load_run(res, r) for r in recs]
 
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -80,15 +109,21 @@ margin:6px 0;font:12px/1.4 ui-monospace,Consolas,monospace;max-height:320px;over
 .legend{font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 10px;vertical-align:-1px}
 @media (max-width:700px){body{flex-direction:column}nav{width:auto;max-height:40vh}}
 </style></head><body>
-<nav><h1>threadcut: agent runs</h1><p>Pi + Qwen3-4B on a Kaggle T4. Keys: j / k to switch runs.</p><div id="list"></div></nav>
+<nav><h1>threadcut: agent runs</h1><p>Pi + Qwen3-4B on a Kaggle T4. Keys: j / k to switch runs.</p>
+<p id="live" class="meta"></p><div id="list"></div></nav>
 <main id="main"></main>
 <script>
-const RUNS = __DATA__;
+let RUNS = __DATA__;
+const LIVE = RUNS === null;
+let follow = true;
 const MODE = {full:["No pruning","var(--full)"], prune_prefix:["Pruning + prefix cache","var(--prefix)"], prune_suffix:["Pruning + suffix reuse","var(--suffix)"]};
 const esc = s => (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const fmt = n => n == null ? "–" : Number(n).toLocaleString();
 let order = [], cur = 0;
+const badge = r => r.pi_status === "running" ? ["running", "meta"] : r.passed ? ["pass", "pass"]
+  : [r.pi_status === "timeout" ? "timeout" : "fail", "fail"];
 function list(){
+  order = [];
   const tasks = [...new Set(RUNS.map(r => r.task))].sort(); let h = "";
   for (const t of tasks){
     h += `<div class="task">${esc(t)}</div>`;
@@ -96,19 +131,20 @@ function list(){
       const r = RUNS.find(x => x.task === t && x.mode === m); if (!r) continue;
       order.push(r.id);
       h += `<div class="run" data-id="${r.id}"><span><span class="dot" style="background:${MODE[m][1]}"></span>${MODE[m][0]}</span>
-            <span class="${r.passed ? "pass" : "fail"}">${r.passed ? "pass" : (r.pi_status === "timeout" ? "timeout" : "fail")}</span></div>`;
+            <span class="${badge(r)[1]}">${badge(r)[0]}</span></div>`;
     }
   }
   document.getElementById("list").innerHTML = h;
   document.querySelectorAll(".run").forEach(el => el.onclick = () => show(order.indexOf(el.dataset.id)));
 }
-function show(i){
+function show(i, keepScroll){
   cur = Math.max(0, Math.min(order.length - 1, i)); const r = RUNS.find(x => x.id === order[cur]);
+  if (!r) return;
   document.querySelectorAll(".run").forEach(el => el.classList.toggle("sel", el.dataset.id === r.id));
   const reuse = r.prompt_tokens ? (100 * r.reused_tokens / r.prompt_tokens).toFixed(1) + "%" : "–";
   let h = `<h2 style="margin:0">${esc(r.task)} · <span style="color:${MODE[r.mode][1]}">${MODE[r.mode][0]}</span></h2>
     <div class="cards">
-      <div class="card"><b class="${r.passed ? "pass" : "fail"}">${r.passed ? "Passed" : "Failed"}</b><span>${esc(r.pi_status)}</span></div>
+      <div class="card"><b class="${badge(r)[1]}">${r.pi_status === "running" ? "Running" : r.passed ? "Passed" : "Failed"}</b><span>${esc(r.pi_status)}</span></div>
       <div class="card"><b>${r.steps}</b><span>agent steps</span></div>
       <div class="card"><b>${fmt(Math.round(r.wall_s))} s</b><span>wall time</span></div>
       <div class="card"><b>${fmt(r.prompt_tokens)}</b><span>tokens in prompts</span></div>
@@ -130,19 +166,69 @@ function show(i){
       ${t.results.map(x => `<div class="lbl">Result: ${esc(x.name)}${x.error ? " (error)" : ""}</div><pre class="${x.error ? "err" : ""}">${esc(x.text)}</pre>`).join("")}
     </div>`;
   });
-  const m = document.getElementById("main"); m.innerHTML = h; m.scrollTop = 0;
+  const m = document.getElementById("main"), top = m.scrollTop; m.innerHTML = h;
+  m.scrollTop = !keepScroll ? 0 : (follow && r.pi_status === "running" ? m.scrollHeight : top);
 }
 document.addEventListener("keydown", e => { if (e.key === "j") show(cur + 1); if (e.key === "k") show(cur - 1); });
-list(); show(0);
+async function poll(){
+  try {
+    const res = await fetch("api/state" + location.search, {cache: "no-store"});
+    if (res.ok) {
+      const sel = order[cur]; RUNS = await res.json(); list();
+      const i = order.indexOf(sel); show(i < 0 ? 0 : i, true);
+      const running = RUNS.filter(r => r.pi_status === "running").length, fin = RUNS.length - running;
+      document.getElementById("live").innerHTML = `LIVE · ${running} running · ${fin} finished · updated ${new Date().toLocaleTimeString()}
+        <label style="display:block;margin-top:4px"><input type="checkbox" ${follow ? "checked" : ""} onchange="follow=this.checked"> follow latest step</label>`;
+    }
+  } catch (e) { document.getElementById("live").textContent = "LIVE · connection lost, retrying"; }
+  setTimeout(poll, 3000);
+}
+if (LIVE) { RUNS = []; poll(); } else { list(); show(0); }
 </script></body></html>"""
 
 
+def serve(res, port, token):
+    """Live dashboard: the page polls /api/state, which re-reads the results folder each time."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            if urllib.parse.parse_qs(url.query).get("t", [None])[0] != token:
+                self.send_error(403)
+                return
+            if url.path == "/api/state":
+                body, ctype = json.dumps(collect(res)).encode(), "application/json"
+            else:
+                body, ctype = PAGE.replace("__DATA__", "null").encode(), "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
 def main():
-    res, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-    recs = [json.loads(l) for l in open(res / "results.jsonl", encoding="utf-8")]
-    runs = [load_run(res, r) for r in recs]
-    data = json.dumps(runs).replace("</", "<\\/")
-    out.write_text(PAGE.replace("__DATA__", data), encoding="utf-8")
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build")
+    b.add_argument("results")
+    b.add_argument("out")
+    v = sub.add_parser("serve")
+    v.add_argument("results")
+    v.add_argument("--port", type=int, default=8090)
+    v.add_argument("--token", required=True)
+    a = p.parse_args()
+    res = pathlib.Path(a.results)
+    if a.cmd == "serve":
+        serve(res, a.port, a.token)
+        return
+    runs = collect(res)
+    out = pathlib.Path(a.out)
+    out.write_text(PAGE.replace("__DATA__", json.dumps(runs).replace("</", "<\\/")), encoding="utf-8")
     print(f"wrote {out} ({out.stat().st_size / 2**20:.1f} MB, {len(runs)} runs, {sum(len(r['turns']) for r in runs)} steps)")
 
 
