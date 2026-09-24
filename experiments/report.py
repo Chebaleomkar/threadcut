@@ -29,6 +29,15 @@ def paired_stats(fresh, surg, iters=10000, seed=0):
     return st.mean(d), means[int(0.025 * iters)], means[int(0.975 * iters)], wins, n, min(1.0, 2 * tail)
 
 
+def trailing_loop(trace):
+    """Length of the run of identical steps (same reply length and tool calls) the trace ends with."""
+    sig = [(t["completion_tokens"], tuple(t["tool_calls"])) for t in trace]
+    n = 1 if sig else 0
+    while n < len(sig) and sig[-n - 1] == sig[-1]:
+        n += 1
+    return n
+
+
 def load(path):
     return [json.loads(line) for line in open(path, encoding="utf-8")] if path.exists() else []
 
@@ -81,8 +90,13 @@ def main():
         cells = []
         for m in modes:
             r = next((r for r in runs if r["task"] == t and r["mode"] == m), None)
-            cells.append("n/a" if r is None else f"{'pass' if r['passed'] else 'fail'}, {r['steps']} steps, "
-                         f"{r['computed_tokens']:,} computed")
+            if r is None:
+                cells.append("n/a")
+                continue
+            loop = trailing_loop(load(res / "traces" / f"{m}__{t}.jsonl"))
+            cells.append(f"{'pass' if r['passed'] else 'fail'}{' (timeout)' if r['pi_status'] == 'timeout' else ''}, "
+                         f"{r['steps']} steps, {r['computed_tokens']:,} computed"
+                         + (f", looped last {loop}" if loop >= 3 else ""))
         per_task.append(f"| {t} | " + " | ".join(cells) + " |")
 
     if modes:
