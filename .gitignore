@@ -10,3 +10,4 @@ pi-config/auth.json
 runs/
 pi-config/models-store.json
 kaggle/_dataset/
+threadcut .md
