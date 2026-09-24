@@ -17,28 +17,68 @@ written from their public descriptions.
 
 ![cost](docs/cost.png)
 
-I recorded 18 real Pi agent conversations with Qwen3-4B on a Kaggle T4 (6 bug-fixing tasks x 3
-modes, 664 agent steps). Then I replayed each conversation under three cache policies, using the
-engine's exact rules. Replaying each run under its own policy reproduces the measured traces for
-all 18 runs, token for token.
+I recorded 36 real Pi agent conversations with Qwen3-4B on a Kaggle T4 (6 bug-fixing tasks x 3
+modes x 2 runs, 1,847 agent steps). Then I replayed each conversation under three cache policies,
+using the engine's exact rules. Replaying each run with the configuration it was recorded under
+reproduces the measured traces for all 36 runs, token for token.
 
-| Policy | Tokens in prompts | Tokens computed (prefill) | vs. no pruning | Mean peak context |
-|---|---|---|---|---|
-| No pruning + prefix cache | 11,774,948 | 132,459 | 1.00x | 11,021 |
-| Pruning (k=1) + prefix cache | 5,447,634 | 361,331 | **2.73x** | 5,745 |
-| Pruning (k=1) + suffix reuse | 5,447,634 | 132,459 | **1.00x** | 5,745 |
+| Policy | Tokens in prompts | Tokens computed (prefill) | vs. no pruning | Est. prefill time (T4) | Mean peak context |
+|---|---|---|---|---|---|
+| No pruning + prefix cache | 27,067,008 | 320,162 | 1.00x | 543 s | 14,336 |
+| Pruning (k=1) + prefix cache | 13,769,130 | 965,414 | **3.02x** | 1,046 s | 7,716 |
+| Pruning (k=1) + suffix reuse | 13,769,130 | 319,415 | **1.00x** | 542 s | 7,716 |
 
 - Pruning halves the context the model attends to and the KV memory it holds. On a standard
   prefix cache, though, every prune invalidates everything after the cut, so the GPU re-prefills
-  2.73x more tokens than if the agent had never pruned at all. This is the problem Subconscious
+  **3x more tokens than if the agent had never pruned at all**. This is the problem Subconscious
   describes, and here it is measured.
-- With suffix reuse, the engine computes exactly the tokens that are new at each step, the same
-  132,459 as an append-only agent. The prune is free in prefill, and the context stays half the
-  size.
+- With suffix reuse, the engine computes only the tokens that are new at each step, the same as
+  an append-only agent. **The prune is free in prefill, and the context stays half the size.**
 - In a single live run, suffix reuse served 98.7% of a 189-step agent's 2.2M prompt tokens from
   cache (27,893 computed).
+- A side effect I did not plan for: suffix matching also repairs cache misses that the agent
+  harness causes. In one unpruned run, the agent re-sent a tool call re-serialized, which changed
+  the history's bytes mid-conversation. A prefix cache recomputes everything after that point;
+  suffix matching found the unchanged remainder and saved 9% of that run's prefill.
 
-### 2. Engineering notes: making decode not collapse on a T4
+### 2. The reused suffix does remember the pruned span (a modest effect)
+
+![drift](docs/drift.png)
+
+Subconscious says pruned information "survives implicitly" in the reused suffix states, because
+the suffix was computed while the pruned span was still visible. I measured this. On 75 pruned
+steps from 6 agent runs, I scored the agent's actual next reply (teacher-forced, 64 tokens) under
+three contexts: the **unpruned** history, the pruned history **recomputed from scratch** (a prefix
+cache), and the pruned history served from the **spliced cache** (suffix reuse).
+
+| Context after a prune | Mean KL to unpruned model | Median KL | Top-1 agreement with unpruned |
+|---|---|---|---|
+| Recomputed from scratch (prefix cache) | 0.338 | 0.190 | 90.0% |
+| Spliced cache (suffix reuse) | **0.294** | **0.171** | **90.9%** |
+
+- The spliced cache was closer to the unpruned model on **50 of 75 steps** (sign test p = 0.005).
+  Mean KL is 13% lower; the paired 95% bootstrap CI is [+0.003, +0.092].
+- **The caveat:** steps within a run are correlated. Resampling whole runs, 5 of 6 runs point the
+  same way, but the run-level CI [-0.006, +0.124] just includes zero. The effect is consistent and
+  modest; more runs would settle it. The effect size does not depend on how many tokens were
+  pruned.
+- So suffix reuse is not only cheaper than recomputing after a prune: its outputs stay slightly
+  closer to what the model would have said with the full history.
+
+### 3. Task success: no measurable difference at this sample size
+
+| Mode | Passed | Timeouts (15 min) |
+|---|---|---|
+| No pruning | 2/6 | 2 |
+| Pruning + prefix cache | 2/6 | 4 |
+| Pruning + suffix reuse | 2/6 | 4 |
+
+With one greedy run per task and a 4B model, pass rates cannot separate the modes, and I do not
+claim they do. Both pruned modes hit the timeout more often (see the failure modes below). No
+agent ever edited a test file (checked in every log), and the grader now restores the original
+tests before checking.
+
+### 4. Engineering notes: making decode not collapse on a T4
 
 The first pilot decoded at 13.6 tok/s at 1.5k context and 3.6 tok/s at 10k. Profiling turned up
 two causes, and both grow with context length:
@@ -59,7 +99,7 @@ Decode on Qwen3-0.6B / GTX 1650 went from 4.1 to 12.8 tok/s at 8k context and fr
 7.4 tok/s at 12k. With no pruning, the engine still produces the same greedy tokens as stock
 transformers `generate`.
 
-### 3. When harness-level agent runs fail
+### 5. When pruning and agent runs fail
 
 - **Malformed tool calls ended 14 of 18 runs in the first benchmark.** When Qwen3-4B edits code
   containing quotes, it writes invalid JSON in about 2% of its replies (14 of 668 tool-call blocks).
@@ -72,8 +112,49 @@ transformers `generate`.
   it times out (the last 8 steps of the pilot were identical). A stub summary of the pruned output
   would help the model but breaks the A·C·D shape (new tokens in the middle). That is a real design
   tension for runtime pruning.
+- **Pruned details the agent still needs.** In one run, after 57 subtasks had been pruned, the
+  agent tried to edit a file using text it remembered from an earlier read. The exact text was
+  gone from its context, so the edit failed ("could not find the exact text"). It re-read the file
+  and repeated the cycle until the timeout. Pruning made each step cheap (37 tokens computed on a
+  7,916-token prompt) but cost the agent a detail it still needed.
 
-<!-- V2 -->
+## What I would build next, inside the runtime
+
+- **Model-driven pruning instead of a fixed rule.** The k=1 stack prunes by position. The loop and
+  "forgotten exact text" failures above are pruning the wrong thing. OrangeLine's Auto Compaction
+  lets the (RL-trained) model choose what to drop; the obvious next step here is a small scorer
+  that keeps tool outputs the agent later references.
+- **Suffix reuse across a replacement, not just a deletion.** Replacing a pruned span with a
+  one-line stub would fix most of the failures above, but it breaks the A·C·D shape: new tokens
+  land in the middle. The engine could prefill the stub at the gap's positions and still reuse C,
+  since causal attention lets C keep its old states; how far that drifts is measurable with the same
+  KL harness.
+- **Paged KV with slot reuse.** The splice currently copies C inside a contiguous buffer
+  (O(|C|)). With a paged cache, dropping B frees pages and C needs only a key re-rotation, which is
+  closer to what a production runtime (vLLM/SGLang-style paging) would do. The next cost to watch
+  is the HBM bandwidth of re-rotating long suffixes.
+- **Concurrency.** Everything here is batch size 1. The real payoff Subconscious reports is more
+  concurrent agents per GPU, because pruned contexts free KV memory. The 2x smaller peak context
+  measured here is the input to that; I have not measured the throughput.
+- **Hybrid models.** TIM-9B mixes attention with recurrent layers, whose state cannot be cut at a
+  token boundary. Suffix reuse there means keeping the recurrent state as is (it already contains
+  the pruned span), which is exactly the "subconscious" behavior, but it needs a different
+  splice.
+
+## Limitations
+
+- Small scale: one 4B model, 6 small tasks, batch size 1, greedy decoding, 2 runs per mode.
+- Task success is too noisy at this size to compare modes.
+- The drift effect is significant per step (p = 0.005) but borderline across runs.
+- Rule-based pruning (k=1) only; no k=0 or k=2 sweep.
+
+## Data
+
+Every agent step is recorded, so all of this can be re-analyzed without a GPU:
+`results/traces/*.jsonl` (per-step cache stats), `results/pi/*.jsonl` (full agent event streams),
+`results/dumps/*.jsonl` (exact messages and generated token ids, used for the cost replay and the
+drift replay). `python -m experiments.viewer build <results> viewer.html` builds a page for
+stepping through any run.
 
 ## How it works
 
