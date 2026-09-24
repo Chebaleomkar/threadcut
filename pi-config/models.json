@@ -1,0 +1,11 @@
+{
+  "providers": {
+    "threadcut": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {"supportsDeveloperRole": false, "supportsReasoningEffort": false},
+      "models": [{"id": "qwen3-4b", "name": "Qwen3-4B on threadcut", "contextWindow": 32768, "maxTokens": 2048, "reasoning": false}]
+    }
+  }
+}

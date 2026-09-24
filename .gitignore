@@ -4,3 +4,7 @@ __pycache__/
 kaggle/*/out/
 .env
 runs/tmp/
+pi-config/sessions/
+pi-config/*.lock
+pi-config/auth.json
+runs/
