@@ -3,7 +3,9 @@
 Usage: python -m experiments.report results/ docs/
 """
 import json
+import math
 import pathlib
+import random
 import statistics as st
 import sys
 
@@ -15,6 +17,16 @@ import matplotlib.pyplot as plt  # noqa: E402
 MODES = {"full": ("No pruning", "#2a78d6"), "prune_prefix": ("Pruning + prefix cache", "#eb6834"),
          "prune_suffix": ("Pruning + suffix reuse", "#1baf7a")}
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
+
+
+def paired_stats(fresh, surg, iters=10000, seed=0):
+    """Mean of (fresh - surgery) KL with a 95% bootstrap CI, and an exact two-sided sign test."""
+    d = [f - s for f, s in zip(fresh, surg)]
+    rng = random.Random(seed)
+    means = sorted(st.mean(rng.choices(d, k=len(d))) for _ in range(iters))
+    wins, n = sum(x > 0 for x in d), sum(x != 0 for x in d)
+    tail = sum(math.comb(n, i) for i in range(min(wins, n - wins) + 1)) / 2 ** n
+    return st.mean(d), means[int(0.025 * iters)], means[int(0.975 * iters)], wins, n, min(1.0, 2 * tail)
 
 
 def load(path):
@@ -80,6 +92,15 @@ def main():
             "Total prefill time across all agent steps", "seconds", lambda v: f"{v:,.0f} s")
 
     drift = load(res / "drift.jsonl")
+    # A looping agent repeats the same reply; keep one row per (run, reply length, pruned span) so
+    # repeated steps do not inflate the count.
+    seen, unique = set(), []
+    for d in drift:
+        key = (d["run"], d["scored_tokens"], d["pruned_tokens"], round(d["fresh_vs_full"]["kl_mean"], 3))
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    n_dupes, drift = len(drift) - len(unique), unique
     dlines = []
     if drift:
         fresh = [d["fresh_vs_full"]["kl_mean"] for d in drift]
@@ -92,7 +113,11 @@ def main():
                   f"| Recomputed from scratch (prefix cache) | {st.mean(fresh):.4f} | {st.median(fresh):.4f} | {t1f:.1%} |",
                   f"| Spliced cache (suffix reuse) | {st.mean(surg):.4f} | {st.median(surg):.4f} | {t1s:.1%} |",
                   "", f"Suffix reuse was closer to the unpruned model on {closer}/{len(drift)} pruned steps "
-                      f"({sum(d['scored_tokens'] for d in drift):,} reply tokens scored)."]
+                      f"({sum(d['scored_tokens'] for d in drift):,} reply tokens scored, {len({d['run'] for d in drift})} runs, "
+                      f"{n_dupes} repeated loop steps removed)."]
+        mean_d, lo, hi, wins, n, p = paired_stats(fresh, surg)
+        dlines += ["", f"Paired difference KL(fresh) - KL(surgery): mean {mean_d:+.4f}, 95% bootstrap CI "
+                       f"[{lo:+.4f}, {hi:+.4f}]; sign test {wins}/{n}, p = {p:.3g}."]
         fig, ax = plt.subplots(figsize=(5.5, 5), dpi=150)
         hi = max(fresh + surg) * 1.05
         ax.plot([0, hi], [0, hi], color=MUTED, linewidth=1, linestyle="--")
