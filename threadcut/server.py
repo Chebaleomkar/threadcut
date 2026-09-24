@@ -32,7 +32,9 @@ def build_app(engine, k, trace_path, model_name, temperature=0.0, max_tokens=409
                          renderer=Renderer(engine.tok))
             engine.suffix = body.get("suffix", True)
             engine.reset()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
         return {"ok": True, **{key: state[key] for key in ("k", "trace", "dump")}, "suffix": engine.suffix}
 
     @app.get("/v1/models")
