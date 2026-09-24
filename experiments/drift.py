@@ -46,21 +46,30 @@ def compare(ref, other):
 
 
 @torch.no_grad()
-def replay(engine, steps, k, n):
+def replay(engine, steps, k, n, max_rows=None, max_prompt=None):
+    """max_rows samples pruned steps evenly across the run; max_prompt skips steps whose unpruned
+    context is too long to recompute twice next to the live cache (T4 memory)."""
     renderer = Renderer(engine.tok)
     engine.reset()
     rows = []
-    for st in steps:
+    pruned_steps = [i for i, st in enumerate(steps) if prune(st["messages"], k)[1]]
+    if max_rows and len(pruned_steps) > max_rows:
+        pruned_steps = [pruned_steps[round(j * (len(pruned_steps) - 1) / (max_rows - 1))] for j in range(max_rows)]
+    measure = set(pruned_steps)
+    for i, st in enumerate(steps):
         messages, tools, gen = st["messages"], st["tools"], st["gen_ids"]
         kept, n_pruned = prune(messages, k)
         ids = renderer.render(kept, tools)
         first, s = engine.load(ids)
         teacher = gen[:n]
-        if s["reused_suffix"] and teacher:
+        full_ids = renderer.render(messages, tools) if i in measure else None
+        if s["reused_suffix"] and teacher and full_ids and (max_prompt is None or len(full_ids) <= max_prompt):
             surgery = reply_logits(engine, engine.cache, first, teacher)
             fed = len(teacher) - 1
             fresh = fresh_logits(engine, ids, teacher)
-            full = fresh_logits(engine, renderer.render(messages, tools), teacher)
+            torch.cuda.empty_cache()
+            full = fresh_logits(engine, full_ids, teacher)
+            torch.cuda.empty_cache()
             rows.append({"step": st["step"], "prompt_tokens": s["prompt_tokens"],
                          "pruned_tokens": s["dropped_from_cache"], "reused_suffix": s["reused_suffix"],
                          "scored_tokens": len(teacher),
@@ -72,7 +81,7 @@ def replay(engine, steps, k, n):
             engine.model(input_ids=torch.tensor([gen[fed:]], device=engine.device),
                          past_key_values=engine.cache, use_cache=True, logits_to_keep=1)
         engine.ids = ids + gen
-        content, calls = parse_reply(engine.tok.decode(gen))
+        content, calls, _ = parse_reply(engine.tok.decode(gen))
         renderer.remember(content, calls, gen)
     return rows
 
@@ -83,6 +92,8 @@ def main():
     p.add_argument("--k", type=int, required=True, help="the k the dumps were recorded with")
     p.add_argument("--n", type=int, default=64, help="reply tokens to score per step")
     p.add_argument("--min-suffix", type=int, default=32)
+    p.add_argument("--max-rows", type=int, default=25, help="pruned steps measured per run")
+    p.add_argument("--max-prompt", type=int, default=10000, help="skip steps with a longer unpruned context")
     p.add_argument("--out", required=True)
     p.add_argument("dumps", nargs="+")
     a = p.parse_args()
@@ -90,7 +101,7 @@ def main():
     with open(a.out, "w", encoding="utf-8") as f:
         for path in a.dumps:
             steps = [json.loads(line) for line in open(path, encoding="utf-8")]
-            for row in replay(engine, steps, a.k, a.n):
+            for row in replay(engine, steps, a.k, a.n, a.max_rows, a.max_prompt):
                 f.write(json.dumps({"run": path, **row}) + "\n")
                 print(path, row["step"], "fresh KL", round(row["fresh_vs_full"]["kl_mean"], 4),
                       "surgery KL", round(row["surgery_vs_full"]["kl_mean"], 4), flush=True)

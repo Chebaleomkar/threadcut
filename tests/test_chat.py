@@ -37,9 +37,21 @@ def test_prune_keeps_last_k_completed_and_the_live_one():
 
 
 def test_parse_reply():
-    content, calls = parse_reply('Let me look.\n<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>')
+    content, calls, bad = parse_reply('Let me look.\n<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>')
     assert content == "Let me look." and calls[0]["function"]["name"] == "bash"
-    assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"}
+    assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"} and bad == 0
+
+
+def test_malformed_call_is_forwarded_not_dropped():
+    # Real failure from the Qwen3-4B run: code with unescaped quotes inside a JSON string.
+    text = ('Fixing it:\n<tool_call>\n{"name": "edit", "arguments": {"path": "a.py", "edits": [{"oldText": '
+            '"x.split(",")", "newText": "x.split(\',\')"}]}}\n</tool_call>')
+    content, calls, bad = parse_reply(text)
+    assert bad == 1 and calls[0]["function"]["name"] == "edit" and content == "Fixing it:"
+    assert calls[0]["function"]["arguments"].startswith('{"path": "a.py"')
+    # Raw newlines inside strings are accepted leniently rather than counted as malformed.
+    _, calls, bad = parse_reply('<tool_call>\n{"name": "bash", "arguments": {"command": "echo a\nb"}}\n</tool_call>')
+    assert bad == 0 and calls[0]["function"]["name"] == "bash"
 
 
 @pytest.fixture(scope="module")
@@ -54,7 +66,7 @@ def test_render_splices_remembered_reply_ids(tok):
     gen = tok.encode('<tool_call>\n{"name":"bash","arguments":{"command":"ls"}}\n</tool_call>', add_special_tokens=False)
     msgs = normalize([{"role": "user", "content": "hi"}])
     prompt = r.render(msgs, TOOLS)
-    content, calls = parse_reply(tok.decode(gen))
+    content, calls, _ = parse_reply(tok.decode(gen))
     r.remember(content, calls, gen)
     # The agent sends the call back re-serialized differently; the rendered history must still
     # begin with exactly prompt + generated ids.
@@ -78,7 +90,7 @@ def test_agent_loop_hits_suffix_cache_after_prune(tok):
         out, s = eng.generate(r.render(kept, TOOLS), max_new_tokens=48)
         s["pruned"] = n_pruned
         stats.append(s)
-        content, calls = parse_reply(tok.decode(out))
+        content, calls, _ = parse_reply(tok.decode(out))
         # Force a tool-call shaped history even if the small model rambles, so pruning has work to do.
         calls = calls or [call("bash", command=f"cat file{i}.py")]
         r.remember(content, calls, out)

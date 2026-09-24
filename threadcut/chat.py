@@ -34,17 +34,37 @@ def reply_key(content, tool_calls):
     return (text_of(content).strip(), tuple(calls))
 
 
+def _parse_call(body):
+    """(name, arguments-json-string, well_formed) for one <tool_call> body, or None if hopeless.
+
+    Small models often write invalid JSON when a tool argument contains code (unescaped quotes).
+    Dropping such a call makes the reply look like a final answer and silently ends the agent's
+    run, so a call whose name is recoverable is forwarded with its raw argument text; the agent
+    harness then reports the bad arguments back to the model, which can retry.
+    """
+    try:
+        obj = json.loads(body, strict=False)
+        return obj["name"], json.dumps(obj.get("arguments", {})), True
+    except (json.JSONDecodeError, KeyError, TypeError):
+        name = re.search(r'"name"\s*:\s*"([^"]+)"', body)
+        if not name:
+            return None
+        args = re.search(r'"arguments"\s*:\s*(.*)\}\s*$', body, re.S)
+        return name.group(1), args.group(1).strip() if args else "{}", False
+
+
 def parse_reply(text):
-    """Split generated text into (content, OpenAI tool_calls)."""
-    calls = []
+    """Split generated text into (content, OpenAI tool_calls, number of malformed calls)."""
+    calls, malformed = [], 0
     for m in TOOL_CALL.finditer(text):
-        try:
-            obj = json.loads(m.group(1))
-            calls.append({"id": f"call_{uuid.uuid4().hex[:12]}", "type": "function",
-                          "function": {"name": obj["name"], "arguments": json.dumps(obj.get("arguments", {}))}})
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return text.strip(), []  # malformed call: hand the raw text back rather than guess
-    return TOOL_CALL.sub("", text).strip(), calls
+        parsed = _parse_call(m.group(1))
+        if parsed is None:
+            return text.strip(), [], 1
+        name, args, ok = parsed
+        malformed += not ok
+        calls.append({"id": f"call_{uuid.uuid4().hex[:12]}", "type": "function",
+                      "function": {"name": name, "arguments": args}})
+    return TOOL_CALL.sub("", text).strip(), calls, malformed
 
 
 def normalize(messages):

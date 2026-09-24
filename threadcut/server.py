@@ -52,13 +52,13 @@ def build_app(engine, k, trace_path, model_name, temperature=0.0, max_tokens=409
             out, stats = engine.generate(ids, max_new_tokens=min(body.get("max_tokens") or max_tokens, max_tokens),
                                          temperature=temperature)
             text = engine.tok.decode(out)
-            content, tool_calls = parse_reply(text)
+            content, tool_calls, malformed = parse_reply(text)
             renderer.remember(content, tool_calls, out)
             state["step"] += 1
             rec = {"step": state["step"], "t": time.time(), "k": k, "suffix": engine.suffix,
                    "n_messages": len(messages), "subtasks_pruned": n_pruned,
                    "full_prompt_tokens": full_tokens or stats["prompt_tokens"], **stats,
-                   "tool_calls": [tc["function"]["name"] for tc in tool_calls],
+                   "tool_calls": [tc["function"]["name"] for tc in tool_calls], "malformed_calls": malformed,
                    "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else None}
             if state["trace"]:
                 with open(state["trace"], "a", encoding="utf-8") as f:

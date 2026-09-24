@@ -21,7 +21,7 @@ MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 MODEL_DIR = "/kaggle/tmp/Qwen3-4B"
 SMALL_DIR = "/kaggle/tmp/Qwen3-0.6B"
 NODE = "v22.20.0"
-PI_TIMEOUT = 1500
+PI_TIMEOUT = 900
 RESULTS_LOCK = threading.Lock()
 MODES = [  # name, k (None = no pruning), suffix reuse
     ("full", None, True),

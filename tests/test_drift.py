@@ -25,7 +25,7 @@ def test_replay_measures_suffix_steps():
     for i in range(4):
         kept, _ = prune(normalize(msgs), 1)
         out, _ = eng.generate(r.render(kept), max_new_tokens=24)
-        content, _ = parse_reply(tok.decode(out))
+        content, _, _ = parse_reply(tok.decode(out))
         r.remember(content, call(i), out)
         steps.append({"step": i + 1, "messages": normalize(msgs), "tools": None, "gen_ids": out})
         msgs += [{"role": "assistant", "content": content, "tool_calls": call(i)},
