@@ -110,6 +110,9 @@ def run_job(port, pidir, task, mode, k, suffix):
         except subprocess.TimeoutExpired:
             status = "timeout"
     wall = time.time() - t0
+    # Grade against the original tests, so an agent that edits the tests cannot pass.
+    shutil.rmtree(f"{wd}/tests", ignore_errors=True)
+    shutil.copytree(f"{SRC}/tasks/{task}/tests", f"{wd}/tests")
     passed = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=wd,
                             capture_output=True).returncode == 0
     steps = [json.loads(line) for line in open(trace)] if os.path.exists(trace) else []
