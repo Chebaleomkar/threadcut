@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 from threadcut.chat import Renderer, normalize, parse_reply, prune
 
 SMALL = os.environ.get("THREADCUT_TEST_MODEL", "models/Qwen3-0.6B")
-TEMPLATE = "models/Qwen3-4B-tok"
+TEMPLATE = "models/Qwen3-4B-tok" if os.path.isdir("models/Qwen3-4B-tok") else "Qwen/Qwen3-4B-Instruct-2507"
 TOOLS = [{"type": "function", "function": {"name": "bash", "description": "run a shell command",
           "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}}]
 
@@ -56,8 +56,6 @@ def test_malformed_call_is_forwarded_not_dropped():
 
 @pytest.fixture(scope="module")
 def tok():
-    if not os.path.isdir(TEMPLATE):
-        pytest.skip("tokenizer not available")
     return AutoTokenizer.from_pretrained(TEMPLATE)
 
 

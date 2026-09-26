@@ -9,6 +9,8 @@ from threadcut.kv import GrowingLayer, shift_keys, rotate_half, splice
 from threadcut.match import Split, split
 
 SMALL = os.environ.get("THREADCUT_TEST_MODEL", "models/Qwen3-0.6B")
+# The tiny CPU model only needs a Qwen tokenizer; use the local copy if present, else the Hub.
+TOKENIZER = SMALL if os.path.isdir(SMALL) else "Qwen/Qwen3-0.6B"
 
 
 def tiny_engine():
@@ -16,7 +18,7 @@ def tiny_engine():
     cfg = Qwen3Config(vocab_size=512, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
                       num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=4096)
     model = AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="sdpa")
-    tok = AutoTokenizer.from_pretrained(SMALL)
+    tok = AutoTokenizer.from_pretrained(TOKENIZER)
     return Engine(None, device="cpu", model=model, tokenizer=tok, min_suffix=4, prefill_chunk=7), 1e-4
 
 
