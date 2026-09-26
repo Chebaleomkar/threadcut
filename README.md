@@ -1,5 +1,7 @@
 # threadcut
 
+[![tests](https://github.com/Chebaleomkar/threadcut/actions/workflows/tests.yml/badge.svg)](https://github.com/Chebaleomkar/threadcut/actions/workflows/tests.yml)
+
 **A mini Subconscious Cache on a free Kaggle T4.** I built a small inference engine that prunes a
 coding agent's working memory mid-run and reuses the KV cache on both sides of the cut, so the
 suffix after a pruned span is shifted into place instead of re-encoded. Then I ran the Pi coding
@@ -204,7 +206,7 @@ Design notes: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Correctness
 
-`pytest tests` (14 tests, CPU and GPU):
+`pytest tests` (14 tests; CI runs the 9 CPU tests on every push, the 5 GPU tests run on a CUDA machine):
 
 - **T1**: rotating a post-RoPE key by `-d` equals RoPE at `p - d`.
 - **T2**: splice exactness. When `C` never saw `B`, dropping `B` and shifting `C` gives the same
